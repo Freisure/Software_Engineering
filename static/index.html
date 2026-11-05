@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#214c69" />
+    <title>书循环 · 校园教材流转</title>
+    <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">跳转到主要内容</a>
+    <header>
+      <div class="topbar">
+        <a class="brand" href="#market"
+          ><img src="/static/logo.svg" alt="" width="38" height="38" /><span
+            >书循环<small>校园教材流转</small></span
+          ></a
+        >
+        <nav aria-label="主要导航" id="nav"></nav>
+        <div id="account"></div>
+      </div>
+    </header>
+    <main id="main" tabindex="-1"><p class="loading">正在整理书架…</p></main>
+    <footer>
+      <strong>书循环</strong><span>让一本好书，继续下一段学习。</span
+      ><span>校内流转 / 线下交接 / 无在线支付</span>
+    </footer>
+    <dialog id="modal" aria-labelledby="modal-title">
+      <div class="dialog-head">
+        <h2 id="modal-title"></h2>
+        <button
+          type="button"
+          class="icon"
+          id="close-modal"
+          aria-label="关闭对话框"
+        >
+          ×
+        </button>
+      </div>
+      <div id="modal-body"></div>
+    </dialog>
+    <div id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.packages/
+instance/
+backups/
+.env
+.secret
+.playwright-cli/
+output/
+test-results/
