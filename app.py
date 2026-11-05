@@ -1,16 +1,19 @@
 """书循环：transaction-backed campus textbook exchange."""
 
 import csv
+import hashlib
 import io
 import json
 import os
 import re
 import secrets
+import smtplib
 import sqlite3
 import time
 import warnings
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
 from flask import Flask, g, jsonify, request, session, send_from_directory, Response
@@ -72,6 +75,25 @@ def redact(text):
     )
 
 
+def migrate(connection):
+    """Forward-only upgrades for databases created before a column existed.
+
+    schema.sql describes a fresh database; this function brings an older one up
+    to the same shape without dropping data.
+    """
+    version = connection.execute("PRAGMA user_version").fetchone()[0]
+    if version < 2:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
+        if columns:
+            if "email" not in columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''"
+                )
+            if "deleted_at" not in columns:
+                connection.execute("ALTER TABLE users ADD COLUMN deleted_at TEXT")
+        connection.execute("PRAGMA user_version=2")
+
+
 def create_app(config=None):
     app = Flask(__name__, static_folder="static")
     instance = ROOT / "instance"
@@ -85,6 +107,15 @@ def create_app(config=None):
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE") == "1",
         PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+        MAIL_FROM=os.environ.get("MAIL_FROM", "no-reply@campus.local"),
+        SMTP_HOST=os.environ.get("SMTP_HOST", ""),
+        SMTP_PORT=int(os.environ.get("SMTP_PORT", "587")),
+        SMTP_USER=os.environ.get("SMTP_USER", ""),
+        SMTP_PASSWORD=os.environ.get("SMTP_PASSWORD", ""),
+        SMTP_TLS=os.environ.get("SMTP_TLS", "1") == "1",
+        OUTBOX=str(instance / "outbox"),
+        EMAIL_CODE_TTL=10,
+        RESET_TTL=30,
     )
     app.config.update(config or {})
     Path(app.config["DATABASE"]).parent.mkdir(parents=True, exist_ok=True)
@@ -122,6 +153,67 @@ def create_app(config=None):
             "INSERT INTO notifications(user_id,message) VALUES(?,?)", (uid, message)
         )
 
+    def utc_text():
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    def utc_after(minutes):
+        return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+    def digest(value):
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def mask_email(value):
+        name, _, domain = (value or "").partition("@")
+        if not domain:
+            return ""
+        return f"{name[:1]}{'*' * max(1, len(name) - 1)}@{domain}"
+
+    def throttle(identity, limit, window, message="操作过于频繁，请稍后重试"):
+        attempt = row("SELECT * FROM login_attempts WHERE identity=?", (identity,))
+        recent = attempt and time.time() - attempt["last_attempt"] < window
+        require(not recent or attempt["failures"] < limit, message, 429)
+        failures = attempt["failures"] + 1 if recent else 1
+        db().execute(
+            "INSERT OR REPLACE INTO login_attempts VALUES(?,?,?)",
+            (identity, failures, time.time()),
+        )
+
+    def clear_throttle(identity):
+        db().execute("DELETE FROM login_attempts WHERE identity=?", (identity,))
+
+    def send_mail(to, subject, body):
+        message = EmailMessage()
+        message["From"] = app.config["MAIL_FROM"]
+        message["To"] = to
+        message["Subject"] = subject
+        message.set_content(body)
+        if app.config["SMTP_HOST"]:
+            try:
+                with smtplib.SMTP(
+                    app.config["SMTP_HOST"], app.config["SMTP_PORT"], timeout=10
+                ) as smtp:
+                    if app.config["SMTP_TLS"]:
+                        smtp.starttls()
+                    if app.config["SMTP_USER"]:
+                        smtp.login(
+                            app.config["SMTP_USER"], app.config["SMTP_PASSWORD"]
+                        )
+                    smtp.send_message(message)
+            except OSError as exc:
+                app.logger.warning("mail delivery failed: %s", exc)
+                raise BusinessError("邮件服务暂不可用，请稍后重试或联系管理员", 503)
+            return "smtp"
+        outbox = Path(app.config["OUTBOX"])
+        outbox.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        path = outbox / f"{stamp}.eml"
+        path.write_bytes(message.as_bytes())
+        # 未配置 SMTP 时邮件只落盘，避免调用方误以为已真实送达。
+        app.logger.info("smtp not configured; mail for %s saved to %s", to, path)
+        return path.name
+
     def settings():
         return {r["key"]: r["value"] for r in rows("SELECT * FROM settings")}
 
@@ -148,7 +240,11 @@ def create_app(config=None):
             db().execute("BEGIN IMMEDIATE")
         if session.get("uid"):
             g.user = row("SELECT * FROM users WHERE id=?", (session["uid"],))
-            if not g.user or session.get("version") != g.user["auth_version"]:
+            if (
+                not g.user
+                or g.user["deleted_at"]
+                or session.get("version") != g.user["auth_version"]
+            ):
                 g.user = None
                 session.clear()
         if request.method not in ("GET", "HEAD", "OPTIONS"):
@@ -158,7 +254,12 @@ def create_app(config=None):
                     "请求来源不匹配",
                     403,
                 )
-            if request.path not in ("/api/login", "/api/register"):
+            if request.path not in (
+                "/api/login",
+                "/api/register",
+                "/api/password/forgot",
+                "/api/password/reset",
+            ):
                 require(g.user is not None, "请先登录", 401)
                 token = request.headers.get("X-CSRF-Token", "")
                 require(
@@ -204,11 +305,14 @@ def create_app(config=None):
         )
 
     def public_user(user):
-        return {
+        visible = {
             k: v
             for k, v in user.items()
             if k not in ("password", "auth_version", "sso_id")
         }
+        visible["email"] = mask_email(visible.get("email", ""))
+        visible["email_bound"] = bool(visible["email"])
+        return visible
 
     def establish(user):
         session.clear()
@@ -271,7 +375,9 @@ def create_app(config=None):
             "尝试过于频繁，请10分钟后重试",
             429,
         )
-        user = row("SELECT * FROM users WHERE student_id=?", (sid,))
+        user = row(
+            "SELECT * FROM users WHERE student_id=? AND deleted_at IS NULL", (sid,)
+        )
         if not user or not check_password_hash(user["password"], password):
             failures = (
                 attempt["failures"] + 1
@@ -290,6 +396,170 @@ def create_app(config=None):
     @app.post("/api/logout")
     def logout():
         session.clear()
+        return jsonify(ok=True)
+
+    @app.post("/api/email/request")
+    @auth()
+    def email_request():
+        email = field(data(), "email", "邮箱", 120).lower()
+        require(
+            re.fullmatch(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}", email), "邮箱格式不正确"
+        )
+        require(
+            not row(
+                "SELECT id FROM users WHERE email=? AND id<>?", (email, g.user["id"])
+            ),
+            "该邮箱已被其他账号绑定",
+            409,
+        )
+        throttle(f"email:{request.remote_addr}", 5, 600)
+        code = f"{secrets.randbelow(1000000):06d}"
+        db().execute("DELETE FROM email_codes WHERE user_id=?", (g.user["id"],))
+        db().execute(
+            "INSERT INTO email_codes(user_id,email,code_hash,expires_at) VALUES(?,?,?,?)",
+            (
+                g.user["id"],
+                email,
+                generate_password_hash(code),
+                utc_after(app.config["EMAIL_CODE_TTL"]),
+            ),
+        )
+        mail = send_mail(
+            email,
+            "书循环 · 邮箱验证码",
+            f"你的验证码是 {code}，{app.config['EMAIL_CODE_TTL']} 分钟内有效。\n"
+            "如非本人操作，请忽略本邮件。",
+        )
+        if mail != "smtp" and app.config["DEMO"]:
+            # 仅演示模式：没有 SMTP 时把验证码打到控制台，方便课堂演示。
+            app.logger.info("demo verification code for %s: %s", email, code)
+        log("email_request", "user", g.user["id"])
+        return jsonify(
+            ok=True, channel="smtp" if mail == "smtp" else "outbox", mail=mail
+        )
+
+    @app.post("/api/email/confirm")
+    @auth()
+    def email_confirm():
+        d = data()
+        email = field(d, "email", "邮箱", 120).lower()
+        code = field(d, "code", "验证码", 6)
+        record = row(
+            "SELECT * FROM email_codes WHERE user_id=? AND email=? ORDER BY id DESC LIMIT 1",
+            (g.user["id"], email),
+        )
+        require(record and record["expires_at"] > utc_text(), "验证码已失效，请重新获取")
+        require(check_password_hash(record["code_hash"], code), "验证码不正确")
+        db().execute("UPDATE users SET email=? WHERE id=?", (email, g.user["id"]))
+        db().execute("DELETE FROM email_codes WHERE user_id=?", (g.user["id"],))
+        log("email_bound", "user", g.user["id"])
+        return jsonify(ok=True, email=mask_email(email))
+
+    @app.post("/api/email/unbind")
+    @auth()
+    def email_unbind():
+        password = field(data(), "password", "密码", 128)
+        require(check_password_hash(g.user["password"], password), "密码不正确", 403)
+        require(bool(g.user["email"]), "当前账号未绑定邮箱", 409)
+        db().execute("UPDATE users SET email='' WHERE id=?", (g.user["id"],))
+        db().execute("DELETE FROM email_codes WHERE user_id=?", (g.user["id"],))
+        db().execute("DELETE FROM password_resets WHERE user_id=?", (g.user["id"],))
+        log("email_unbind", "user", g.user["id"])
+        return jsonify(ok=True)
+
+    @app.post("/api/account/delete")
+    @auth()
+    def delete_account():
+        password = field(data(), "password", "密码", 128)
+        require(check_password_hash(g.user["password"], password), "密码不正确", 403)
+        uid = g.user["id"]
+        if g.user["role"] == "admin":
+            admins = row(
+                "SELECT COUNT(*) AS n FROM users WHERE role='admin' AND deleted_at IS NULL"
+            )["n"]
+            require(admins > 1, "至少保留一名管理员，请先移交管理职责", 409)
+        active = row(
+            """SELECT COUNT(*) AS n FROM reservations
+               WHERE status IN ('pending','accepted','ready','confirming','disputed')
+                 AND (buyer_id=? OR book_id IN (SELECT id FROM books WHERE owner_id=?))""",
+            (uid, uid),
+        )["n"]
+        require(not active, "还有进行中的预约，请先完成或取消后再注销", 409)
+        # 在架教材下架，其余记录保留以支撑评价与审计。
+        db().execute(
+            "UPDATE books SET status='withdrawn' WHERE owner_id=? AND status IN ('pending','approved')",
+            (uid,),
+        )
+        db().execute("DELETE FROM email_codes WHERE user_id=?", (uid,))
+        db().execute("DELETE FROM password_resets WHERE user_id=?", (uid,))
+        # 软注销：释放学号与邮箱，清空联系方式，密码置为不可用随机值。
+        db().execute(
+            """UPDATE users SET deleted_at=CURRENT_TIMESTAMP, student_id=?, email='',
+                      contact='', nickname=?, password=?, auth_version=auth_version+1
+               WHERE id=?""",
+            (
+                f"deleted-{uid}",
+                "已注销用户",
+                generate_password_hash(secrets.token_urlsafe(32)),
+                uid,
+            ),
+        )
+        log("account_delete", "user", uid)
+        session.clear()
+        return jsonify(ok=True)
+
+    @app.post("/api/password/forgot")
+    def forgot_password():
+        sid = field(data(), "student_id", "学号", 24)
+        throttle(f"forgot:{request.remote_addr}", 5, 600)
+        user = row("SELECT * FROM users WHERE student_id=? AND email<>''", (sid,))
+        # The reply never reveals whether the account exists or has an email.
+        if user:
+            token = secrets.token_urlsafe(32)
+            db().execute("DELETE FROM password_resets WHERE user_id=?", (user["id"],))
+            db().execute(
+                "INSERT INTO password_resets(user_id,token_hash,expires_at) VALUES(?,?,?)",
+                (user["id"], digest(token), utc_after(app.config["RESET_TTL"])),
+            )
+            link = f"{request.host_url.rstrip('/')}/#reset/{token}"
+            try:
+                send_mail(
+                    user["email"],
+                    "书循环 · 重置密码",
+                    f"请在 {app.config['RESET_TTL']} 分钟内打开下面的链接重置密码：\n\n"
+                    f"{link}\n\n如非本人操作，请忽略本邮件，你的密码不会被修改。",
+                )
+                log("password_forgot", "user", user["id"])
+            except BusinessError:
+                app.logger.warning("reset mail failed for user %s", user["id"])
+        return jsonify(ok=True)
+
+    @app.post("/api/password/reset")
+    def reset_password():
+        d = data()
+        token = field(d, "token", "重置凭证", 200)
+        password = field(d, "password", "新密码", 128)
+        require(len(password) >= 8, "密码至少8位")
+        throttle(f"reset:{request.remote_addr}", 10, 600)
+        record = row(
+            "SELECT * FROM password_resets WHERE token_hash=? AND used_at IS NULL",
+            (digest(token),),
+        )
+        require(record and record["expires_at"] > utc_text(), "链接已失效，请重新申请")
+        db().execute(
+            "UPDATE users SET password=?,auth_version=auth_version+1 WHERE id=?",
+            (generate_password_hash(password), record["user_id"]),
+        )
+        db().execute(
+            "UPDATE password_resets SET used_at=CURRENT_TIMESTAMP WHERE id=?",
+            (record["id"],),
+        )
+        db().execute(
+            "DELETE FROM password_resets WHERE user_id=? AND id<>?",
+            (record["user_id"], record["id"]),
+        )
+        clear_throttle(f"reset:{request.remote_addr}")
+        log("password_reset", "user", record["user_id"])
         return jsonify(ok=True)
 
     @app.put("/api/profile")
@@ -1121,6 +1391,7 @@ def create_app(config=None):
 
     with app.app_context():
         db().execute("PRAGMA journal_mode=WAL")
+        migrate(db())
         db().executescript((ROOT / "schema.sql").read_text(encoding="utf-8"))
         for k, v in DEFAULTS.items():
             db().execute("INSERT OR IGNORE INTO settings VALUES(?,?)", (k, v))

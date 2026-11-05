@@ -47,13 +47,15 @@ erDiagram
   USERS ||--o{ UPLOADS : owns
   USERS ||--o{ NOTIFICATIONS : receives
   USERS ||--o{ LOGS : acts
+  USERS ||--o{ EMAIL_CODES : verifies
+  USERS ||--o{ PASSWORD_RESETS : resets
 ```
 
 主要字段与约束：
 
 | 表 | 主要字段 | 关键约束 |
 |---|---|---|
-| users | student_id, password, role, credit, contact, auth_version | 学号唯一；密码加盐scrypt；修改密码递增会话版本 |
+| users | student_id, password, role, credit, contact, email, auth_version, deleted_at | 学号唯一；密码加盐scrypt；修改密码递增会话版本；非空邮箱唯一；注销为软删除：清空邮箱与联系方式、学号改为 deleted-&lt;id&gt;、在架教材下架，历史记录保留为“已注销用户” |
 | courses | code, name, college, textbook | 课程代码主键 |
 | books | owner_id, course_code, condition, price, images, status | 外键课程；成色1—5；价格非负整数分 |
 | reservations | book_id, buyer_id, status, seller_confirm, buyer_confirm | 活跃状态的book_id部分唯一索引 |
@@ -63,6 +65,10 @@ erDiagram
 | report_appeals | appeal_id, original_id | 同一原举报只允许一轮复核 |
 | logs | actor_id, action, entity, entity_id, detail, created_at | 无客户端编辑和删除接口，与业务同事务 |
 | settings | key, value | 信用阈值、完成奖励、处罚额、超时小时数 |
+| email_codes | user_id, email, code_hash, expires_at | 验证码只存scrypt哈希，10分钟过期，重新获取即作废旧码 |
+| password_resets | user_id, token_hash, expires_at, used_at | 只存令牌SHA-256；一次性使用；重置成功递增 auth_version |
+
+结构变更通过 `PRAGMA user_version` 做前向迁移：`migrate()` 在 `schema.sql` 之前执行，为旧库补列，升级后重启为幂等操作。
 
 数据库完整定义以 `schema.sql` 为准。图片以随机文件名储存，教材记录保留1—3个图片路径。
 

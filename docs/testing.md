@@ -4,7 +4,7 @@
 
 ## 自动化业务测试
 
-`python -m pytest -q`：12组集成测试通过。测试针对真实Flask请求、隔离SQLite数据库和真实图片内容，不使用业务逻辑模拟。
+`python -m pytest -q`：16组集成测试通过。测试针对真实Flask请求、隔离SQLite数据库和真实图片内容，不使用业务逻辑模拟。
 
 | 测试 | 覆盖的行为 |
 |---|---|
@@ -20,6 +20,10 @@
 | report_appeal_reverses_credit_only_once | 举报误罚复核、实际信用恢复、禁止重复恢复与申诉 |
 | backup_produces_consistent_database_and_upload_copy | 备份完整性、用户数据与图片存在、密钥不入备份 |
 | admin_provision_is_explicit_and_password_hashed | 显式管理员创建与密码哈希 |
+| email_binding_requires_the_mailed_code | 邮箱格式、验证码错误被拒、绑定前不生效、绑定后仅返回脱敏邮箱 |
+| password_reset_end_to_end | 未知学号不泄漏账号、一次性重置链接、重置后旧会话失效、旧密码不可登录、链接不可重放 |
+| email_can_be_unbound_with_the_password | 错误密码拒绝解绑、解绑后邮箱清空、未绑定账号不再发送重置邮件 |
+| account_deletion_releases_the_student_id | 错误密码拒绝注销、注销后会话失效、学号释放可重新注册、旧密码不可登录 |
 
 开发时先对空接口运行核心测试，得到6组预期失败，再实现到通过。处罚复核和维护命令均先观察缺失行为导致的失败，再实现并运行完整测试。最终源码另执行JavaScript语法检查。
 

@@ -168,7 +168,7 @@ async function market() {
 }
 function loginPage(register = false) {
   $("#main").innerHTML =
-    `<div class="auth-box"><div class="panel"><span class="eyebrow">欢迎来到书循环</span><h1>${register ? "创建校园账号" : "让好书，再流转一次"}</h1><p class="hint">${register ? "账号仅用于本校教材流转，不需要身份证信息。" : "使用学号登录，管理你的教材与交接。"}</p><form id="auth-form">${field("student_id", "学号", "text", "", 'required minlength="4" maxlength="24" autocomplete="username"')}${register ? field("nickname", "昵称", "text", "", 'required maxlength="30"') + field("college", "学院", "text", "", 'required maxlength="50"') + field("class_name", "班级", "text", "", 'required maxlength="50"') : ""}${field("password", "密码", "password", "", 'required minlength="8" maxlength="128" autocomplete="' + (register ? "new-password" : "current-password") + '"')}<p class="error" tabindex="-1" role="alert"></p><button type="submit">${register ? "注册账号" : "登录"}</button></form><p class="hint">${register ? '已有账号？ <a href="#login">返回登录</a>' : '还没有账号？ <a href="#register">注册账号</a>'}</p></div>${demo ? '<div class="notice">演示账号：20240001（发布者）、20240002（需求者）、admin（管理员）<br>演示密码均为 Campus2026!<br>演示数据均为虚构。</div>' : ""}</div>`;
+    `<div class="auth-box"><div class="panel"><span class="eyebrow">欢迎来到书循环</span><h1>${register ? "创建校园账号" : "让好书，再流转一次"}</h1><p class="hint">${register ? "账号仅用于本校教材流转，不需要身份证信息。" : "使用学号登录，管理你的教材与交接。"}</p><form id="auth-form">${field("student_id", "学号", "text", "", 'required minlength="4" maxlength="24" autocomplete="username"')}${register ? field("nickname", "昵称", "text", "", 'required maxlength="30"') + field("college", "学院", "text", "", 'required maxlength="50"') + field("class_name", "班级", "text", "", 'required maxlength="50"') : ""}${field("password", "密码", "password", "", 'required minlength="8" maxlength="128" autocomplete="' + (register ? "new-password" : "current-password") + '"')}<p class="error" tabindex="-1" role="alert"></p><button type="submit">${register ? "注册账号" : "登录"}</button></form><p class="hint">${register ? '已有账号？ <a href="#login">返回登录</a>' : '还没有账号？ <a href="#register">注册账号</a> · <a href="#forgot">忘记密码</a>'}</p></div>${demo ? '<div class="notice">演示账号：20240001（发布者）、20240002（需求者）、admin（管理员）<br>演示密码均为 Campus2026!<br>演示数据均为虚构。邮件通知会写入 instance/outbox/。</div>' : ""}</div>`;
   formHandler("#auth-form", async (d) => {
     await api(register ? "/register" : "/login", "POST", d);
     if (register) {
@@ -179,6 +179,25 @@ function loginPage(register = false) {
       location.hash = "market";
       toast("登录成功");
     }
+  });
+}
+function forgotPage() {
+  $("#main").innerHTML =
+    `<div class="auth-box"><div class="panel"><span class="eyebrow">找回密码</span><h1>重新设置密码</h1><p class="hint">输入学号，重置链接会发到你此前绑定的邮箱。</p><p class="hint">还没有绑定邮箱？登录后在「个人中心 › 找回邮箱」绑定；未绑定邮箱的账号忘记密码，请联系管理员重置。</p>${demo ? '<p class="hint">演示环境未接入邮件服务，重置链接会写入 instance/outbox/。</p>' : ""}<form id="forgot-form">${field("student_id", "学号", "text", "", 'required minlength="4" maxlength="24" autocomplete="username"')}<p class="error" tabindex="-1" role="alert"></p><button type="submit">发送重置链接</button></form><p id="forgot-status" class="hint" role="status"></p><p class="hint"><a href="#login">返回登录</a></p></div></div>`;
+  formHandler("#forgot-form", async (d) => {
+    await api("/password/forgot", "POST", d);
+    $("#forgot-status").textContent =
+      "如果该学号已绑定邮箱，重置链接已发出，30 分钟内有效。";
+  });
+}
+function resetPage(token) {
+  $("#main").innerHTML =
+    `<div class="auth-box"><div class="panel"><span class="eyebrow">重置密码</span><h1>设置新密码</h1><p class="hint">链接 30 分钟内有效，且只能使用一次。</p><form id="reset-form">${field("password", "新密码", "password", "", 'required minlength="8" maxlength="128" autocomplete="new-password"')}${field("confirm", "确认新密码", "password", "", 'required minlength="8" maxlength="128" autocomplete="new-password"')}<p class="error" tabindex="-1" role="alert"></p><button type="submit">重置密码</button></form><p class="hint"><a href="#forgot">重新申请</a> · <a href="#login">返回登录</a></p></div></div>`;
+  formHandler("#reset-form", async (d) => {
+    if (d.password !== d.confirm) throw new Error("两次输入的密码不一致");
+    await api("/password/reset", "POST", { token, password: d.password });
+    toast("密码已重置，请用新密码登录");
+    location.hash = "login";
   });
 }
 async function publishPage(id) {
@@ -385,7 +404,7 @@ async function profile() {
   ]);
   $("#main").innerHTML =
     head("个人中心", "维护资料，查看消息、信用与申诉进度。") +
-    `<div class="panel profile-head"><div class="avatar">${esc(user.nickname.slice(0, 1))}</div><div><h3>${esc(user.nickname)}</h3><span class="meta">${esc(user.student_id)} / ${esc(user.college)} / ${esc(user.class_name)}</span></div><div class="price">${user.credit}<small> 信用分</small></div></div><div class="split"><form id="profile-form" class="panel"><h3>个人资料</h3>${field("nickname", "昵称", "text", user.nickname, 'required maxlength="30"')}${field("college", "学院", "text", user.college, 'required maxlength="50"')}${field("class_name", "班级", "text", user.class_name, 'required maxlength="50"')}${field("contact", "联系方式", "text", user.contact, 'maxlength="100"')}<p class="hint">仅预约接受后对交易对方可见。累计主动取消 ${user.cancellations} 次。</p><p class="error" role="alert" tabindex="-1"></p><button type="submit">保存资料</button></form><div><form id="password-form" class="panel"><h3>修改密码</h3>${field("old_password", "原密码", "password", "", 'required autocomplete="current-password"')}${field("password", "新密码", "password", "", 'required minlength="8" maxlength="128" autocomplete="new-password"')}<p class="error" role="alert" tabindex="-1"></p><button type="submit" class="secondary">更新密码</button></form><div class="panel"><div class="section-head"><h3>站内消息</h3><button class="quiet small" data-action="read-notes">全部已读</button></div>${
+    `<div class="panel profile-head"><div class="avatar">${esc(user.nickname.slice(0, 1))}</div><div><h3>${esc(user.nickname)}</h3><span class="meta">${esc(user.student_id)} / ${esc(user.college)} / ${esc(user.class_name)}</span></div><div class="price">${user.credit}<small> 信用分</small></div></div><div class="split"><div><form id="profile-form" class="panel"><h3>个人资料</h3>${field("nickname", "昵称", "text", user.nickname, 'required maxlength="30"')}${field("college", "学院", "text", user.college, 'required maxlength="50"')}${field("class_name", "班级", "text", user.class_name, 'required maxlength="50"')}${field("contact", "联系方式", "text", user.contact, 'maxlength="100"')}<p class="hint">仅预约接受后对交易对方可见。累计主动取消 ${user.cancellations} 次。</p><p class="error" role="alert" tabindex="-1"></p><button type="submit">保存资料</button></form><div class="panel"><h3>注销账号</h3><p class="hint">注销后学号释放、邮箱与联系方式清空、在架教材下架；教材、评价与日志保留为“已注销用户”。若有进行中的预约，请先完成或取消。此操作不可撤销。</p><form id="delete-form">${field("password", "当前密码", "password", "", 'required autocomplete="current-password"')}${field("confirm", "输入“注销”确认", "text", "", 'required maxlength="10"')}<p class="error" role="alert" tabindex="-1"></p><button type="submit" class="danger">注销账号</button></form></div></div><div><form id="password-form" class="panel"><h3>修改密码</h3>${field("old_password", "原密码", "password", "", 'required autocomplete="current-password"')}${field("password", "新密码", "password", "", 'required minlength="8" maxlength="128" autocomplete="new-password"')}<p class="error" role="alert" tabindex="-1"></p><button type="submit" class="secondary">更新密码</button></form><form id="email-form" class="panel"><h3>找回邮箱</h3><p class="hint">${user.email_bound ? "当前已绑定 " + esc(user.email) + "，忘记密码时可自助重置。" : "尚未绑定。绑定后忘记密码可自助重置，无需联系管理员。"}</p>${field("email", "邮箱", "email", "", 'required maxlength="120" autocomplete="email"')}<div class="actions"><button type="button" id="send-code" class="secondary">发送验证码</button></div>${field("code", "邮箱验证码", "text", "", 'required inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"')}<p class="hint">验证码 10 分钟内有效，点击发送后查收邮件。${demo ? "演示环境未配置 SMTP：验证码会写入 instance/outbox/，同时打印在服务端控制台。" : ""}</p><p class="error" role="alert" tabindex="-1"></p><div class="actions"><button type="submit">确认绑定</button>${user.email_bound ? '<button type="button" id="unbind-email" class="quiet small">解绑邮箱</button>' : ""}</div></form><div class="panel"><div class="section-head"><h3>站内消息</h3><button class="quiet small" data-action="read-notes">全部已读</button></div>${
       notes.length
         ? notes
             .slice(0, 10)
@@ -405,6 +424,54 @@ async function profile() {
     await api("/password", "POST", d);
     f.reset();
     toast("密码已更新，其他设备需重新登录");
+  });
+  const emailError = $("#email-form .error");
+  $("#send-code").addEventListener("click", async () => {
+    const email = $("#f-email").value.trim();
+    emailError.textContent = "";
+    try {
+      const r = await api("/email/request", "POST", { email });
+      toast(
+        r.channel === "smtp"
+          ? "验证码已发送，10 分钟内有效"
+          : `未配置邮件服务：验证码已写入 instance/outbox/${r.mail}`,
+      );
+    } catch (e) {
+      emailError.textContent = e.message;
+      emailError.focus();
+    }
+  });
+  formHandler("#email-form", async (d) => {
+    await api("/email/confirm", "POST", {
+      email: d.email.trim(),
+      code: d.code,
+    });
+    await refreshMe();
+    toast("邮箱已绑定，可用于找回密码");
+    await render();
+  });
+  const unbind = $("#unbind-email");
+  if (unbind)
+    unbind.addEventListener("click", () => {
+      modal(
+        "解绑邮箱",
+        `<form id="unbind-form"><p class="hint">解绑后忘记密码只能联系管理员重置。请输入当前密码确认。</p>${field("password", "当前密码", "password", "", 'required autocomplete="current-password"')}<p class="error" role="alert" tabindex="-1"></p><div class="actions"><button type="submit" class="danger">确认解绑</button><button type="button" class="quiet" id="cancel-unbind">取消</button></div></form>`,
+      );
+      $("#cancel-unbind").addEventListener("click", closeModal);
+      formHandler("#unbind-form", async (d) => {
+        await api("/email/unbind", "POST", { password: d.password });
+        closeModal();
+        toast("邮箱已解绑");
+        await refreshMe();
+        await render();
+      });
+    });
+  formHandler("#delete-form", async (d) => {
+    if (d.confirm.trim() !== "注销") throw new Error("请输入“注销”两个字以确认");
+    await api("/account/delete", "POST", { password: d.password });
+    await refreshMe();
+    toast("账号已注销");
+    location.hash = "login";
   });
 }
 function reportCard(r, admin) {
@@ -658,7 +725,11 @@ async function render() {
   const version = ++routeVersion;
   const route = location.hash.slice(1) || "market";
   navigation();
-  if (!["market", "login", "register"].includes(route) && !user) {
+  if (
+    !["market", "login", "register", "forgot"].includes(route) &&
+    !route.startsWith("reset/") &&
+    !user
+  ) {
     location.hash = "login";
     return;
   }
@@ -667,6 +738,8 @@ async function render() {
     if (route === "market") await market();
     else if (route === "login" || route === "register")
       loginPage(route === "register");
+    else if (route === "forgot") forgotPage();
+    else if (route.startsWith("reset/")) resetPage(route.slice(6));
     else if (route === "publish" || route.startsWith("edit/"))
       await publishPage(route.split("/")[1]);
     else if (route === "mine") await mine();
